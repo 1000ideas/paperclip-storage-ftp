@@ -32,13 +32,44 @@ module Paperclip
       end
 
       def flush_writes
+
+        @queued_for_write.each do |style_name, file|
+          local_path = instance.local_path(style_name)
+
+          FileUtils.mkdir_p(File.dirname(local_path))
+          begin
+            FileUtils.mv(file.path, local_path)
+          rescue SystemCallError
+            File.open(local_path, "wb") do |new_file|
+              while chunk = file.read(16 * 1024)
+                new_file.write(chunk)
+              end
+            end
+          end
+          unless @options[:override_file_permissions] == false
+            resolved_chmod = (@options[:override_file_permissions] &~ 0111) || (0666 &~ File.umask)
+            FileUtils.chmod( resolved_chmod, local_path )
+          end
+          file.rewind
+        end
+
         with_ftp_servers do |servers|
           servers.map do |server|
             Thread.new do
               @queued_for_write.each do |style_name, file|
-                remote_path = path(style_name)
-                log("saving ftp://#{server.user}@#{server.host}:#{remote_path}")
-                server.put_file(file.path, remote_path)
+                local_path = instance.local_path(style_name)
+                target_path = path(style_name)
+                log("local path: #{local_path}")
+                log("saving ftp://#{server.user}@#{server.host}:#{target_path}")
+                server.put_file(local_path, target_path)
+                if server.connection.size(target_path) == File.size(local_path)
+                  log("deleting local file")
+                  File.delete(local_path)
+                else
+                  log("put file retry")
+                  server.put_file(local_path, target_path)
+                  File.delete(local_path)
+                end
               end
             end
           end.each(&:join)
